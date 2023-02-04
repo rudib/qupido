@@ -1,6 +1,6 @@
 use std::{collections::HashMap, any::{Any, TypeId}, sync::Arc};
 
-use petgraph::{Graph, algo::{toposort, tred::dag_to_toposorted_adjacency_list}, adj::NodeIndex, visit::IntoNeighbors};
+use petgraph::{Graph, algo::{toposort, tred::dag_to_toposorted_adjacency_list}, adj::NodeIndex, visit::{IntoNeighbors, Dfs, Topo, Walker, NodeIndexable}};
 use uuid::Uuid;
 
 
@@ -44,7 +44,8 @@ pub fn id(s: impl Into<String>) -> Source {
 
 
 pub struct Pipeline {
-    nodes: Vec<Node>
+    nodes: Vec<Node>,
+    graph: Graph<Uuid, Source>
 }
 
 impl Pipeline {
@@ -73,14 +74,13 @@ impl Pipeline {
             }
         }
 
-        //println!("g={:#?}", g);
-        
         let sorted = toposort(&g, None).expect("Can't topologically sort");
 
         Pipeline {
             nodes: sorted.into_iter()
                         .map(|idx| nodes.get(idx.index()).unwrap().clone())
-                        .collect()
+                        .collect(),
+            graph: g
         }
 
         
@@ -98,11 +98,44 @@ impl Pipeline {
             
             container = ctx.inputs;
             for o in &n.outputs {
-                container.data.insert(o.get_id(), res.data.remove(&o.get_id()).expect("Missing output from node func"));
+                let val = res.data.remove(&o.get_id()).expect("Missing output?");
+                container.data.insert(o.get_id(), val);
             }
         }
 
         container
+    }
+
+    pub fn free_inputs(&self) -> Vec<Source> {
+        todo!()
+    }
+
+    pub fn outputs(&self) -> Vec<Source> {
+        let mut r = vec![];
+        //let topo = Topo::new(&self.graph).iter(&self.graph);
+        
+        //for idx in topo {
+        for n in &self.nodes {
+            let idx = self.graph.node_weights().position(|id| n.id == *id).expect("ha?");            
+            let idx = self.graph.from_index(idx);
+            println!("{} => {:?}", n.id, idx);
+
+            let outgoing_edges = self.graph.edges_directed(idx, petgraph::Direction::Outgoing).collect::<Vec<_>>();
+            println!("{:#?}", outgoing_edges);
+
+            for output in &n.outputs {
+                if !outgoing_edges.iter().any(|e| e.weight() == output) {
+                    r.push(output.clone());
+                }
+            }
+            //let node_id = self.graph[idx];
+            //let node = self.nodes.in
+        }
+        r
+    }
+
+    pub fn all_outputs(&self) -> Vec<Source> {
+        todo!()
     }
 }
 
@@ -152,7 +185,7 @@ impl Container {
         } else {
             let msg = format!("Requested type {:?}, stored type is {:?}", TypeId::of::<V>(), v.type_id());
             panic!("{}", msg);
-        }        
+        }
     }
 }
 
@@ -168,7 +201,7 @@ fn test_nodes_topo() {
     let a = Node {
         id: Uuid::new_v4(),
         inputs: vec![id("a"), id("b")],
-        outputs: vec![id("foo")],
+        outputs: vec![id("c")],
         func: NodeFunc { f: 
             Arc::new(Box::new(
                 |c| {
@@ -178,24 +211,26 @@ fn test_nodes_topo() {
                     let res = a + b;
 
                     let mut r = Container::new();
-                    r.insert("foo", res);
+                    r.insert("c", res);
                     r
                 }
             ))
         }
     };
 
+    /*
     let b = Node {
         id: Uuid::new_v4(),
-        inputs: vec![id("foo")],
+        inputs: vec![id("c")],
         outputs: vec![],
-        func: NodeFunc { f: Arc::new(Box::new(|c| {
-            let v = c.inputs.get::<u32>("foo");
+        func: NodeFunc { f: Arc::new(Box::new(|ctx| {
+            let c = ctx.inputs.get::<u32>("c");
 
-            println!("result={}", v);
+            println!("c={}", c);
             Container::new()
         })) }
     };
+    */
 
     /*
     let c = Node {
@@ -233,9 +268,23 @@ fn test_nodes_topo() {
         c
     };
 
-    let pipeline = Pipeline::from_nodes(&[a, b]);
+    let pipeline = Pipeline::from_nodes(&[a]);
+
+    assert_eq!(pipeline.outputs(), vec![id("c")]);
+
+
+
+
+
+
+
+
     let result = pipeline.run(container);
 
+    let c = result.get::<u32>("c");
+    assert_eq!(*c, 4);
+
+    
         
     
 
