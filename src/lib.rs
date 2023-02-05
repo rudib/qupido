@@ -32,7 +32,32 @@ impl NodeSources {
     pub fn outputs(&self) -> Vec<Source> {
         match self {
             NodeSources::List(l) => l.clone(),
-            NodeSources::Map(m) => m.values().cloned().collect(),
+            NodeSources::Map(m) => m.values().cloned().collect(), // is this right?
+        }
+    }
+
+    pub fn map<F>(&self, map: F) -> Self
+        where F: Fn(&Source) -> Source
+    {
+        match self {
+            NodeSources::List(l) => {
+                let mut h = HashMap::new();
+                for node_id in l {
+                    let global_id = map(node_id);
+                    h.insert(node_id.clone(), global_id);
+                }
+
+                NodeSources::Map(h) 
+            },
+            NodeSources::Map(m) => {
+                /*
+                let mapped = m.iter().map(|(k, v)| {
+                    (map(k), map(v))
+                });
+                Self::Map(mapped.collect())
+                */
+                todo!()
+            },
         }
     }
 }
@@ -280,32 +305,13 @@ impl Pipeline {
 
     pub fn with_namespace(&self, namespace: &str) -> QupidoResult<Pipeline> {
         let new_nodes: Vec<_> = self.nodes.iter().map(|n| {
-            let new_inputs = match &n.inputs {
-                NodeSources::List(l) => {
-                    let mut h = HashMap::new();
-                    for node_id in l {
-                        let global_id = id(format!("{}.{}", namespace, node_id.get_id()));
-                        h.insert(node_id.clone(), global_id);
-                    }
-
-                    NodeSources::Map(h)
-                },
-                NodeSources::Map(_) => todo!(),
+            let mapping = |node_id: &Source| {
+                let global_id = id(format!("{}.{}", namespace, node_id.get_id()));
+                global_id
             };
-
-            let new_outputs = match &n.outputs {
-                NodeSources::List(l) => {
-                    let mut h = HashMap::new();
-                    for node_id in l {
-                        let global_id = id(format!("{}.{}", namespace, node_id.get_id()));
-                        h.insert(node_id.clone(), global_id);
-                    }
-
-                    NodeSources::Map(h)
-                },
-                NodeSources::Map(_) => todo!(),
-            };
-
+            let new_inputs = n.inputs.map(mapping);
+            let new_outputs = n.outputs.map(mapping);
+            
             Node { id: Uuid::new_v4(), inputs: new_inputs, outputs: new_outputs, tags: n.tags.clone(), func: n.func.clone() }
 
         }).collect();
