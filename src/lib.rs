@@ -28,6 +28,41 @@ impl NodeSources {
             NodeSources::Map(m) => m.values().cloned().collect(),
         }
     }
+
+    pub fn outputs(&self) -> Vec<Source> {
+        match self {
+            NodeSources::List(l) => l.clone(),
+            NodeSources::Map(m) => m.values().cloned().collect(),
+        }
+    }
+}
+
+impl From<&[Source]> for NodeSources {
+    fn from(value: &[Source]) -> Self {
+        NodeSources::List(value.to_vec())
+    }
+}
+
+impl<const N: usize> From<[Source; N]> for NodeSources {
+    fn from(value: [Source; N]) -> Self {
+        NodeSources::List(value.to_vec())
+    }
+}
+
+impl From<&[(Source, Source)]> for NodeSources {
+    fn from(value: &[(Source, Source)]) -> Self {
+        let mut m = HashMap::new();
+        for (k, v) in value {
+            m.insert(k.clone(), v.clone());
+        }
+        NodeSources::Map(m)
+    }
+}
+
+impl<const N: usize> From<[(Source, Source); N]> for NodeSources {
+    fn from(value: [(Source, Source); N]) -> Self {
+        NodeSources::Map(HashMap::from(value))
+    }
 }
 
 
@@ -35,19 +70,19 @@ impl NodeSources {
 pub struct Node {
     pub id: Uuid,
     pub inputs: NodeSources,
-    pub outputs: Vec<Source>,
+    pub outputs: NodeSources,
     pub tags: Vec<Tag>,
     pub func: NodeFunc
 }
 
 impl Node {
-    pub fn new<F>(inputs: NodeSources, outputs: &[Source], func: F) -> Self
+    pub fn new<F>(inputs: impl Into<NodeSources>, outputs: impl Into<NodeSources>, func: F) -> Self
         where F: Fn(&Context) -> Container + 'static
     {
         Node {
             id: Uuid::new_v4(),
-            inputs: inputs,
-            outputs: outputs.to_vec(),
+            inputs: inputs.into(),
+            outputs: outputs.into(),
             tags: vec![],
             func: NodeFunc { f: Arc::new(Box::new(func)) }
         }
@@ -105,7 +140,7 @@ impl Pipeline {
 
         let mut outputs = HashMap::new();
         for n in nodes {
-            for o in &n.outputs {
+            for o in &n.outputs.outputs() {
                 if let Some(_) = outputs.insert(o.clone(), n.id) {
                     panic!("Duplicate output");
                 }
@@ -147,8 +182,8 @@ impl Pipeline {
                 match &n.inputs {
                     NodeSources::List(_) => (),
                     NodeSources::Map(m) => {
-                        for (k, v) in m {
-                            c.data.insert(k.get_id(), c.data.get(&v.get_id()).expect("missing?").clone());
+                        for (node_id, global_id) in m {
+                            c.data.insert(node_id.get_id(), c.data.get(&global_id.get_id()).expect("missing?").clone());
                         }
                     },
                 }
@@ -159,11 +194,21 @@ impl Pipeline {
             };
             let mut res = (n.func.f)(&ctx);
             
-            for o in &n.outputs {
-                let val = res.data.remove(&o.get_id()).expect("Missing output?");
-                // todo: mapping for outputs
-                container_run_state.data.insert(o.get_id(), val);
+            match &n.outputs {
+                NodeSources::List(l) => {
+                    for o in l {
+                        let val = res.data.remove(&o.get_id()).expect("Missing output?");
+                        container_run_state.data.insert(o.get_id(), val);
+                    }
+                },
+                NodeSources::Map(m) => {
+                    for (node_id, global_id) in m {
+                        let val = res.data.remove(&node_id.get_id()).expect("missing?");
+                        container_run_state.data.insert(global_id.get_id(), val);
+                    }
+                },
             }
+
         }
 
         container_run_state
@@ -198,7 +243,7 @@ impl Pipeline {
         
             let outgoing_edges = self.graph.edges_directed(idx, petgraph::Direction::Outgoing).collect::<Vec<_>>();
         
-            for output in &n.outputs {
+            for output in &n.outputs.outputs() {
                 if !outgoing_edges.iter().any(|e| e.weight() == output) {
                     r.push(output.clone());
                 }
@@ -212,7 +257,7 @@ impl Pipeline {
     pub fn all_outputs(&self) -> Vec<Source> {
         let mut r = vec![];
         for n in &self.nodes {
-            for output in &n.outputs {
+            for output in &n.outputs.outputs() {
                 if !r.contains(output) {
                     r.push(output.clone());
                 }
@@ -295,26 +340,30 @@ pub type QupidoResult<T = ()> = Result<T, QupidoError>;
 
 #[test]
 fn test_nodes_topo() {
-    let a = Node::new(NodeSources::Map(HashMap::from([(id("param_a"), id("a")), (id("param_b"), id("b"))])),
-            &[id("a_plus_b"), id("a_times_b")],
+    let a = Node::new([(id("param_a"), id("a")), (id("param_b"), id("b"))],
+            //[id("a_plus_b"), id("a_times_b")],
+            [
+                (id("out_plus"), id("a_plus_b")),
+                (id("out_times"), id("a_times_b"))
+            ],
         |ctx| {
             let a: &u32 = ctx.inputs.get("param_a");
             let b: &u32 = ctx.inputs.get("param_b");
 
             let mut r = Container::new();
-            r.insert("a_plus_b", a + b);
-            r.insert("a_times_b", a * b);
+            r.insert("out_plus", a + b);
+            r.insert("out_times", a * b);
             r
         }).tag("math").tag("plus").tag("multiply");
 
-    let b = Node::new(NodeSources::List([id("a_plus_b")].to_vec()), &[id("squared")], |ctx| {
+    let b = Node::new([id("a_plus_b")], [id("squared")], |ctx| {
         let v = ctx.inputs.get::<u32>("a_plus_b");
         let mut r = Container::new();
         r.insert("squared", v * v);
         r
     }).tag("math");
 
-    let c = Node::new(NodeSources::List([id("squared")].to_vec()), &[id("squared_plus_1")], |ctx| {
+    let c = Node::new([id("squared")], [id("squared_plus_1")], |ctx| {
         let v = ctx.inputs.get::<u32>("squared");
         let mut r = Container::new();
         r.insert("squared_plus_1", v + 1);
