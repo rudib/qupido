@@ -277,6 +277,41 @@ impl Pipeline {
         a.extend_from_slice(&other.nodes);
         Self::from_nodes(a.as_slice())
     }
+
+    pub fn with_namespace(&self, namespace: &str) -> QupidoResult<Pipeline> {
+        let new_nodes: Vec<_> = self.nodes.iter().map(|n| {
+            let new_inputs = match &n.inputs {
+                NodeSources::List(l) => {
+                    let mut h = HashMap::new();
+                    for node_id in l {
+                        let global_id = id(format!("{}.{}", namespace, node_id.get_id()));
+                        h.insert(node_id.clone(), global_id);
+                    }
+
+                    NodeSources::Map(h)
+                },
+                NodeSources::Map(_) => todo!(),
+            };
+
+            let new_outputs = match &n.outputs {
+                NodeSources::List(l) => {
+                    let mut h = HashMap::new();
+                    for node_id in l {
+                        let global_id = id(format!("{}.{}", namespace, node_id.get_id()));
+                        h.insert(node_id.clone(), global_id);
+                    }
+
+                    NodeSources::Map(h)
+                },
+                NodeSources::Map(_) => todo!(),
+            };
+
+            Node { id: Uuid::new_v4(), inputs: new_inputs, outputs: new_outputs, tags: n.tags.clone(), func: n.func.clone() }
+
+        }).collect();
+
+        Self::from_nodes(new_nodes.as_slice())
+    }
 }
 
 
@@ -459,8 +494,18 @@ fn test_namespaces() -> QupidoResult {
     let data_result = x_y.run(&data)?;
     assert_eq!(*data_result.get::<i64>("x+y")?, 9 as i64);
 
-
+    let x_y_namespaced = num_calc::<i64>()?.with_namespace("calc")?;
+    println!("namespaced={:#?}", x_y_namespaced);
     
+    assert_eq!(x_y_namespaced.inputs(), vec![id("calc.x"), id("calc.y")]);
+    assert_eq!(x_y_namespaced.outputs(), vec![id("calc.x+y")]);
+
+    let mut data2 = Container::new();
+    data2.insert("calc.x", 5 as i64)?;
+    data2.insert("calc.y", 10 as i64)?;
+    let data2_result = x_y_namespaced.run(&data2)?;
+    assert_eq!(*data2_result.get::<i64>("calc.x+y")?, 15);
+
 
 
     Ok(())
