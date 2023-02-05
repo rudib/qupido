@@ -1,4 +1,4 @@
-use std::{collections::HashMap, any::{Any, TypeId}, sync::Arc};
+use std::{collections::HashMap, any::{Any, TypeId}, sync::Arc, ops::Add};
 
 use petgraph::{Graph, algo::{toposort}, visit::{NodeIndexable}};
 use uuid::Uuid;
@@ -62,6 +62,12 @@ impl From<&[(Source, Source)]> for NodeSources {
 impl<const N: usize> From<[(Source, Source); N]> for NodeSources {
     fn from(value: [(Source, Source); N]) -> Self {
         NodeSources::Map(HashMap::from(value))
+    }
+}
+
+impl From<()> for NodeSources {
+    fn from(value: ()) -> Self {
+        Self::List(vec![])
     }
 }
 
@@ -167,7 +173,7 @@ impl Pipeline {
         })
     }
 
-    pub fn run(&self, container: Container) -> QupidoResult<Container> {
+    pub fn run(&self, container: &Container) -> QupidoResult<Container> {
 
         let mut container_run_state = container.clone();
 
@@ -265,6 +271,12 @@ impl Pipeline {
         r.sort();
         r
     }
+
+    pub fn add(&self, other: &Pipeline) -> QupidoResult<Pipeline> {
+        let mut a = self.nodes.clone();
+        a.extend_from_slice(&other.nodes);
+        Self::from_nodes(a.as_slice())
+    }
 }
 
 
@@ -346,8 +358,12 @@ pub enum QupidoError {
 pub type QupidoResult<T = ()> = Result<T, QupidoError>;
 
 
+
+
 #[test]
 fn test_nodes_topo() -> QupidoResult {
+
+
     let a = Node::new([(id("param_a"), id("a")), (id("param_b"), id("b"))],
             [
                 (id("out_plus"), id("a_plus_b")),
@@ -378,28 +394,74 @@ fn test_nodes_topo() -> QupidoResult {
     }).tag("math");
     
 
+    let pipeline = Pipeline::from_nodes(&[a, b, c])?;
+    println!("pipeline={:#?}", pipeline);
+
     let container = {
         let mut c = Container::new();
         c.insert("a", 3 as u32)?;
         c.insert("b", 5 as u32)?;
         c
     };
+    
+    {
+        assert_eq!(pipeline.inputs(), vec![id("a"), id("b")]);
+        assert_eq!(pipeline.outputs(), vec![id("a_times_b"), id("squared_plus_1")]);
+        assert_eq!(pipeline.all_outputs(), vec![id("a_plus_b"), id("a_times_b"), id("squared"), id("squared_plus_1")]);
 
-    let pipeline = Pipeline::from_nodes(&[a, b, c])?;
+        let result = pipeline.run(&container)?;
+        println!("result: {:#?}", result);
 
-    println!("pipeline={:#?}", pipeline);
-
-    assert_eq!(pipeline.inputs(), vec![id("a"), id("b")]);
-    assert_eq!(pipeline.outputs(), vec![id("a_times_b"), id("squared_plus_1")]);
-    assert_eq!(pipeline.all_outputs(), vec![id("a_plus_b"), id("a_times_b"), id("squared"), id("squared_plus_1")]);
-
+        let a_plus_b = result.get::<u32>("a_plus_b")?;
+        assert_eq!(*a_plus_b, 8);
+    }
 
 
-    let result = pipeline.run(container)?;
-    println!("result: {:#?}", result);
+    let pb = Pipeline::from_nodes(&[
+        Node::new([id("squared_plus_1")], (), |ctx| {
+            println!("val: {:?}", ctx.inputs.get::<u32>("squared_plus_1")?);
+            Ok(Container::new())
+        })
+    ])?;
 
-    let a_plus_b = result.get::<u32>("a_plus_b")?;
-    assert_eq!(*a_plus_b, 8);
+    let full = pipeline.add(&pb)?;
+    {
+        let result = full.run(&container)?;
+    }
+
         
+    Ok(())
+}
+
+#[test]
+fn test_namespaces() -> QupidoResult {
+
+    pub fn num_calc<T>() -> QupidoResult<Pipeline>
+        where T: Add<T, Output = T> + Debug + Clone + 'static
+    {
+        let n = Node::new([id("x"), id("y")], [id("x+y")],
+        |ctx| {
+            let x = ctx.inputs.get::<T>("x")?;
+            let y = ctx.inputs.get::<T>("y")?;
+
+            let mut r = Container::new();
+            r.insert("x+y", x.clone() + y.clone())?;
+            Ok(r)
+        });
+        Pipeline::from_nodes(&[n])
+    }
+
+    let x_y = num_calc::<i64>()?;
+    let mut data = Container::new();
+    data.insert("x", -3 as i64)?;
+    data.insert("y", 12 as i64)?;
+
+    let data_result = x_y.run(&data)?;
+    assert_eq!(*data_result.get::<i64>("x+y")?, 9 as i64);
+
+
+    
+
+
     Ok(())
 }
