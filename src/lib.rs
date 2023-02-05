@@ -1,6 +1,6 @@
 use std::{collections::HashMap, any::{Any, TypeId}, sync::Arc};
 
-use petgraph::{Graph, algo::{toposort, tred::dag_to_toposorted_adjacency_list}, adj::NodeIndex, visit::{IntoNeighbors, Dfs, Topo, Walker, NodeIndexable}};
+use petgraph::{Graph, algo::{toposort}, visit::{NodeIndexable}};
 use uuid::Uuid;
 use std::fmt::Debug;
 
@@ -77,7 +77,7 @@ pub struct Node {
 
 impl Node {
     pub fn new<F>(inputs: impl Into<NodeSources>, outputs: impl Into<NodeSources>, func: F) -> Self
-        where F: Fn(&Context) -> Container + 'static
+        where F: Fn(&Context) -> QupidoResult<Container> + 'static
     {
         Node {
             id: Uuid::new_v4(),
@@ -97,7 +97,7 @@ impl Node {
 
 #[derive(Clone)]
 pub struct NodeFunc {
-    pub f: Arc<Box<dyn Fn(&Context) -> Container>>
+    pub f: Arc<Box<dyn Fn(&Context) -> QupidoResult<Container>>>
 }
 
 impl std::fmt::Debug for NodeFunc {
@@ -170,7 +170,7 @@ impl Pipeline {
         
     }
 
-    pub fn run(&self, container: Container) -> Container {
+    pub fn run(&self, container: Container) -> QupidoResult<Container> {
 
         let mut container_run_state = container.clone();
 
@@ -192,7 +192,7 @@ impl Pipeline {
             let ctx = Context {
                 inputs: container_input
             };
-            let mut res = (n.func.f)(&ctx);
+            let mut res = (n.func.f)(&ctx)?;
             
             match &n.outputs {
                 NodeSources::List(l) => {
@@ -211,7 +211,7 @@ impl Pipeline {
 
         }
 
-        container_run_state
+        Ok(container_run_state)
     }
 
     pub fn inputs(&self) -> Vec<Source> {
@@ -300,14 +300,16 @@ impl Container {
         }
     }
 
-    pub fn insert<V>(&mut self, key: &str, value: V)
+    pub fn insert<V>(&mut self, key: &str, value: V) -> QupidoResult
         where V: ContainerData + 'static 
     {
         if self.data.contains_key(key) {
-            panic!("already exists");
+            return Err(QupidoError::DuplicateData(key.to_string()));
         }
 
-        self.upsert(key, value)
+        self.upsert(key, value);
+
+        Ok(())
     }
 
     pub fn upsert<V>(&mut self, key: &str, value: V)
@@ -316,65 +318,71 @@ impl Container {
         self.data.insert(key.to_string(), Arc::new(Box::new(value)));
     }
 
-    pub fn get<V>(&self, key: &str) -> &V
+    pub fn get<V>(&self, key: &str) -> QupidoResult<&V>
         where V: ContainerData + 'static
     {
         let v = self.data.get(key).expect(&format!("id {} not found", key));
         let v = (***v).as_any();
 
         if let Some(v) = v.downcast_ref() {
-            v
+            Ok(v)
         } else {
-            let msg = format!("Requested type {:?}, stored type is {:?}", TypeId::of::<V>(), v.type_id());
-            panic!("{}", msg);
+            Err(QupidoError::DataTypeMismatch { id: key.to_string(), requested: TypeId::of::<V>(), stored: v.type_id() })
         }
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum QupidoError {
-
+    DataNotFound(String),
+    InvalidPipeline,
+    DuplicateData(String),
+    DataTypeMismatch {
+        id: String,
+        requested: TypeId,
+        stored: TypeId
+    }
 }
 
 pub type QupidoResult<T = ()> = Result<T, QupidoError>;
 
 
 #[test]
-fn test_nodes_topo() {
+fn test_nodes_topo() -> QupidoResult {
     let a = Node::new([(id("param_a"), id("a")), (id("param_b"), id("b"))],
-            //[id("a_plus_b"), id("a_times_b")],
             [
                 (id("out_plus"), id("a_plus_b")),
                 (id("out_times"), id("a_times_b"))
             ],
         |ctx| {
-            let a: &u32 = ctx.inputs.get("param_a");
-            let b: &u32 = ctx.inputs.get("param_b");
+            let a: &u32 = ctx.inputs.get("param_a")?;
+            let b: &u32 = ctx.inputs.get("param_b")?;
 
             let mut r = Container::new();
-            r.insert("out_plus", a + b);
-            r.insert("out_times", a * b);
-            r
+            r.insert("out_plus", a + b)?;
+            r.insert("out_times", a * b)?;
+            Ok(r)
         }).tag("math").tag("plus").tag("multiply");
 
     let b = Node::new([id("a_plus_b")], [id("squared")], |ctx| {
-        let v = ctx.inputs.get::<u32>("a_plus_b");
+        let v = ctx.inputs.get::<u32>("a_plus_b")?;
         let mut r = Container::new();
-        r.insert("squared", v * v);
-        r
+        r.insert("squared", v * v)?;
+        Ok(r)
     }).tag("math");
 
     let c = Node::new([id("squared")], [id("squared_plus_1")], |ctx| {
-        let v = ctx.inputs.get::<u32>("squared");
+        let v = ctx.inputs.get::<u32>("squared")?;
         let mut r = Container::new();
-        r.insert("squared_plus_1", v + 1);
-        r
+        r.insert("squared_plus_1", v + 1)?;
+        Ok(r)
     }).tag("math");
     
 
     let container = {
         let mut c = Container::new();
-        c.insert("a", 3 as u32);
-        c.insert("b", 5 as u32);
+        c.insert("a", 3 as u32)?;
+        c.insert("b", 5 as u32)?;
         c
     };
 
@@ -388,15 +396,11 @@ fn test_nodes_topo() {
 
 
 
-    let result = pipeline.run(container);
+    let result = pipeline.run(container)?;
     println!("result: {:#?}", result);
 
-    let a_plus_b = result.get::<u32>("a_plus_b");
+    let a_plus_b = result.get::<u32>("a_plus_b")?;
     assert_eq!(*a_plus_b, 8);
-
-    
         
-    
-
-
+    Ok(())
 }
