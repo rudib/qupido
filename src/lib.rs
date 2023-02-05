@@ -4,6 +4,14 @@ use petgraph::{Graph, algo::{toposort, tred::dag_to_toposorted_adjacency_list}, 
 use uuid::Uuid;
 
 
+#[derive(Clone, Debug)]
+pub enum Tag {
+    Tag(String)
+}
+
+pub fn tag(tag: impl Into<String>) -> Tag {
+    Tag::Tag(tag.into())
+}
 
 
 #[derive(Clone, Debug)]
@@ -11,7 +19,28 @@ pub struct Node {
     pub id: Uuid,
     pub inputs: Vec<Source>,
     pub outputs: Vec<Source>,
+    pub tags: Vec<Tag>,
     pub func: NodeFunc
+}
+
+impl Node {
+    pub fn new<F>(inputs: &[Source], outputs: &[Source], func: F) -> Self
+        where F: Fn(&Context) -> Container + 'static
+    {
+        Node {
+            id: Uuid::new_v4(),
+            inputs: inputs.to_vec(),
+            outputs: outputs.to_vec(),
+            tags: vec![],
+            func: NodeFunc { f: Arc::new(Box::new(func)) }
+        }
+    }
+
+    pub fn tag(self, simple_tag: impl Into<String>) -> Self {
+        let mut s = self.clone();
+        s.tags.push(tag(simple_tag));
+        s
+    }
 }
 
 #[derive(Clone)]
@@ -43,6 +72,7 @@ pub fn id(s: impl Into<String>) -> Source {
 }
 
 
+#[derive(Debug)]
 pub struct Pipeline {
     nodes: Vec<Node>,
     graph: Graph<Uuid, Source>
@@ -106,36 +136,52 @@ impl Pipeline {
         container
     }
 
-    pub fn free_inputs(&self) -> Vec<Source> {
-        todo!()
+    pub fn inputs(&self) -> Vec<Source> {
+        let mut r = vec![];
+        
+        for n in &self.nodes {
+            let idx = self.graph.node_weights().position(|id| n.id == *id).expect("ha?");            
+            let idx = self.graph.from_index(idx);
+        
+            let incoming_edges = self.graph.edges_directed(idx, petgraph::Direction::Incoming).collect::<Vec<_>>();
+        
+            for input in &n.inputs {
+                if !incoming_edges.iter().any(|e| e.weight() == input) {
+                    r.push(input.clone());
+                }
+            }
+        }
+        r
     }
 
     pub fn outputs(&self) -> Vec<Source> {
         let mut r = vec![];
-        //let topo = Topo::new(&self.graph).iter(&self.graph);
         
-        //for idx in topo {
         for n in &self.nodes {
             let idx = self.graph.node_weights().position(|id| n.id == *id).expect("ha?");            
             let idx = self.graph.from_index(idx);
-            println!("{} => {:?}", n.id, idx);
-
+        
             let outgoing_edges = self.graph.edges_directed(idx, petgraph::Direction::Outgoing).collect::<Vec<_>>();
-            println!("{:#?}", outgoing_edges);
-
+        
             for output in &n.outputs {
                 if !outgoing_edges.iter().any(|e| e.weight() == output) {
                     r.push(output.clone());
                 }
             }
-            //let node_id = self.graph[idx];
-            //let node = self.nodes.in
         }
         r
     }
 
     pub fn all_outputs(&self) -> Vec<Source> {
-        todo!()
+        let mut r = vec![];
+        for n in &self.nodes {
+            for output in &n.outputs {
+                if !r.contains(output) {
+                    r.push(output.clone());
+                }
+            }
+        }
+        r
     }
 }
 
@@ -198,39 +244,31 @@ pub type QupidoResult<T = ()> = Result<T, QupidoError>;
 
 #[test]
 fn test_nodes_topo() {
-    let a = Node {
-        id: Uuid::new_v4(),
-        inputs: vec![id("a"), id("b")],
-        outputs: vec![id("c")],
-        func: NodeFunc { f: 
-            Arc::new(Box::new(
-                |c| {
-                    let a: &u32 = c.inputs.get("a");
-                    let b: &u32 = c.inputs.get("b");
+    let a = Node::new(&[id("a"), id("b")], &[id("a_plus_b"), id("a_times_b")],
+        |ctx| {
+            let a: &u32 = ctx.inputs.get("a");
+            let b: &u32 = ctx.inputs.get("b");
 
-                    let res = a + b;
+            let mut r = Container::new();
+            r.insert("a_plus_b", a + b);
+            r.insert("a_times_b", a * b);
+            r
+        }).tag("math").tag("plus").tag("multiply");
 
-                    let mut r = Container::new();
-                    r.insert("c", res);
-                    r
-                }
-            ))
-        }
-    };
+    let b = Node::new(&[id("a_plus_b")], &[id("squared")], |ctx| {
+        let v = ctx.inputs.get::<u32>("a_plus_b");
+        let mut r = Container::new();
+        r.insert("squared", v * v);
+        r
+    }).tag("math");
 
-    /*
-    let b = Node {
-        id: Uuid::new_v4(),
-        inputs: vec![id("c")],
-        outputs: vec![],
-        func: NodeFunc { f: Arc::new(Box::new(|ctx| {
-            let c = ctx.inputs.get::<u32>("c");
-
-            println!("c={}", c);
-            Container::new()
-        })) }
-    };
-    */
+    let c = Node::new(&[id("squared")], &[id("squared_plus_1")], |ctx| {
+        let v = ctx.inputs.get::<u32>("squared");
+        let mut r = Container::new();
+        r.insert("squared_plus_1", v + 1);
+        r
+    }).tag("math");
+    
 
     /*
     let c = Node {
@@ -263,26 +301,25 @@ fn test_nodes_topo() {
 
     let container = {
         let mut c = Container::new();
-        c.insert("a", 2 as u32);
-        c.insert("b", 2 as u32);
+        c.insert("a", 3 as u32);
+        c.insert("b", 5 as u32);
         c
     };
 
-    let pipeline = Pipeline::from_nodes(&[a]);
+    let pipeline = Pipeline::from_nodes(&[a, b, c]);
 
-    assert_eq!(pipeline.outputs(), vec![id("c")]);
+    println!("pipeline={:#?}", pipeline);
 
-
-
-
-
+    assert_eq!(pipeline.inputs(), vec![id("a"), id("b")]);
+    assert_eq!(pipeline.outputs(), vec![id("a_times_b"), id("squared_plus_1")]);
+    assert_eq!(pipeline.all_outputs(), vec![id("a_plus_b"), id("a_times_b"), id("squared"), id("squared_plus_1")]);
 
 
 
     let result = pipeline.run(container);
 
-    let c = result.get::<u32>("c");
-    assert_eq!(*c, 4);
+    let a_plus_b = result.get::<u32>("a_plus_b");
+    assert_eq!(*a_plus_b, 8);
 
     
         
