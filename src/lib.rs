@@ -2,6 +2,7 @@ use std::{collections::HashMap, any::{Any, TypeId}, sync::Arc};
 
 use petgraph::{Graph, algo::{toposort, tred::dag_to_toposorted_adjacency_list}, adj::NodeIndex, visit::{IntoNeighbors, Dfs, Topo, Walker, NodeIndexable}};
 use uuid::Uuid;
+use std::fmt::Debug;
 
 
 #[derive(Clone, Debug)]
@@ -14,22 +15,38 @@ pub fn tag(tag: impl Into<String>) -> Tag {
 }
 
 
+#[derive(Debug, Clone)]
+pub enum NodeSources {
+    List(Vec<Source>),
+    Map(HashMap<Source, Source>)
+}
+
+impl NodeSources {
+    pub fn inputs(&self) -> Vec<Source> {
+        match self {
+            NodeSources::List(l) => l.clone(),
+            NodeSources::Map(m) => m.values().cloned().collect(),
+        }
+    }
+}
+
+
 #[derive(Clone, Debug)]
 pub struct Node {
     pub id: Uuid,
-    pub inputs: Vec<Source>,
+    pub inputs: NodeSources,
     pub outputs: Vec<Source>,
     pub tags: Vec<Tag>,
     pub func: NodeFunc
 }
 
 impl Node {
-    pub fn new<F>(inputs: &[Source], outputs: &[Source], func: F) -> Self
+    pub fn new<F>(inputs: NodeSources, outputs: &[Source], func: F) -> Self
         where F: Fn(&Context) -> Container + 'static
     {
         Node {
             id: Uuid::new_v4(),
-            inputs: inputs.to_vec(),
+            inputs: inputs,
             outputs: outputs.to_vec(),
             tags: vec![],
             func: NodeFunc { f: Arc::new(Box::new(func)) }
@@ -54,7 +71,7 @@ impl std::fmt::Debug for NodeFunc {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub enum Source {
     Id(String)
 }
@@ -96,8 +113,9 @@ impl Pipeline {
         }
         for n in nodes {
             let dst = graph_nodes.get(&n.id).expect("Dest node not found");
-            for i in &n.inputs {
-                if let Some(node_source_id) = outputs.get(i) {
+            
+            for i in n.inputs.inputs() {
+                if let Some(node_source_id) = outputs.get(&i) {
                     let src = graph_nodes.get(node_source_id).expect("Source node not found");
                     g.add_edge(src.clone(), dst.clone(), i.clone());
                 }
@@ -117,23 +135,38 @@ impl Pipeline {
         
     }
 
-    pub fn run(&self, mut container: Container) -> Container {
+    pub fn run(&self, container: Container) -> Container {
+
+        let mut container_run_state = container.clone();
+
         for n in &self.nodes {
 
-            // todo: copy just the needed inputs?
+            // remap
+            let container_input = {
+                let mut c = container_run_state.clone();
+                match &n.inputs {
+                    NodeSources::List(_) => (),
+                    NodeSources::Map(m) => {
+                        for (k, v) in m {
+                            c.data.insert(k.get_id(), c.data.get(&v.get_id()).expect("missing?").clone());
+                        }
+                    },
+                }
+                c
+            };
             let ctx = Context {
-                inputs: container
+                inputs: container_input
             };
             let mut res = (n.func.f)(&ctx);
             
-            container = ctx.inputs;
             for o in &n.outputs {
                 let val = res.data.remove(&o.get_id()).expect("Missing output?");
-                container.data.insert(o.get_id(), val);
+                // todo: mapping for outputs
+                container_run_state.data.insert(o.get_id(), val);
             }
         }
 
-        container
+        container_run_state
     }
 
     pub fn inputs(&self) -> Vec<Source> {
@@ -145,12 +178,14 @@ impl Pipeline {
         
             let incoming_edges = self.graph.edges_directed(idx, petgraph::Direction::Incoming).collect::<Vec<_>>();
         
-            for input in &n.inputs {
+            for input in &n.inputs.inputs() {
                 if !incoming_edges.iter().any(|e| e.weight() == input) {
                     r.push(input.clone());
                 }
             }
         }
+
+        r.sort();
         r
     }
 
@@ -169,6 +204,8 @@ impl Pipeline {
                 }
             }
         }
+
+        r.sort();
         r
     }
 
@@ -181,6 +218,8 @@ impl Pipeline {
                 }
             }
         }
+
+        r.sort();
         r
     }
 }
@@ -194,8 +233,19 @@ impl Context {
     
 }
 
+#[derive(Clone, Debug)]
 pub struct Container {
-    data: HashMap<String, Box<dyn Any>>
+    data: HashMap<String, Arc<Box<dyn ContainerData>>>
+}
+
+pub trait ContainerData: Any + Debug {
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;    
+}
+
+impl<T> ContainerData for T where T: Any + Debug {
+    fn as_any(&self) -> &dyn Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn Any { self }
 }
 
 impl Container {
@@ -206,7 +256,7 @@ impl Container {
     }
 
     pub fn insert<V>(&mut self, key: &str, value: V)
-        where V: 'static 
+        where V: ContainerData + 'static 
     {
         if self.data.contains_key(key) {
             panic!("already exists");
@@ -216,16 +266,17 @@ impl Container {
     }
 
     pub fn upsert<V>(&mut self, key: &str, value: V)
-        where V: 'static 
+        where V: ContainerData + 'static 
     {
-        self.data.insert(key.to_string(), Box::new(value));
+        self.data.insert(key.to_string(), Arc::new(Box::new(value)));
     }
 
     pub fn get<V>(&self, key: &str) -> &V
-        where V: 'static
+        where V: ContainerData + 'static
     {
-        let v = self.data.get(key).expect("id not found");
-        
+        let v = self.data.get(key).expect(&format!("id {} not found", key));
+        let v = (***v).as_any();
+
         if let Some(v) = v.downcast_ref() {
             v
         } else {
@@ -244,10 +295,11 @@ pub type QupidoResult<T = ()> = Result<T, QupidoError>;
 
 #[test]
 fn test_nodes_topo() {
-    let a = Node::new(&[id("a"), id("b")], &[id("a_plus_b"), id("a_times_b")],
+    let a = Node::new(NodeSources::Map(HashMap::from([(id("param_a"), id("a")), (id("param_b"), id("b"))])),
+            &[id("a_plus_b"), id("a_times_b")],
         |ctx| {
-            let a: &u32 = ctx.inputs.get("a");
-            let b: &u32 = ctx.inputs.get("b");
+            let a: &u32 = ctx.inputs.get("param_a");
+            let b: &u32 = ctx.inputs.get("param_b");
 
             let mut r = Container::new();
             r.insert("a_plus_b", a + b);
@@ -255,49 +307,20 @@ fn test_nodes_topo() {
             r
         }).tag("math").tag("plus").tag("multiply");
 
-    let b = Node::new(&[id("a_plus_b")], &[id("squared")], |ctx| {
+    let b = Node::new(NodeSources::List([id("a_plus_b")].to_vec()), &[id("squared")], |ctx| {
         let v = ctx.inputs.get::<u32>("a_plus_b");
         let mut r = Container::new();
         r.insert("squared", v * v);
         r
     }).tag("math");
 
-    let c = Node::new(&[id("squared")], &[id("squared_plus_1")], |ctx| {
+    let c = Node::new(NodeSources::List([id("squared")].to_vec()), &[id("squared_plus_1")], |ctx| {
         let v = ctx.inputs.get::<u32>("squared");
         let mut r = Container::new();
         r.insert("squared_plus_1", v + 1);
         r
     }).tag("math");
     
-
-    /*
-    let c = Node {
-        id: Uuid::new_v4(),
-        inputs: vec![Source::Id("foo".into())],
-        outputs: vec![Source::Id("bar".into())]
-    };
-
-    let d = Node {
-        id: Uuid::new_v4(),
-        inputs: vec![Source::Id("bar".into()), Source::Id("foo".into())],
-        outputs: vec![Source::Id("xyz".into())]
-    };
-
-    let e = Node {
-        id: Uuid::new_v4(),
-        inputs: vec![Source::Id("zzz".into()), Source::Id("bar".into())],
-        outputs: vec![Source::Id("123".into())]
-    };
-
-    let f = Node {
-        id: Uuid::new_v4(),
-        inputs: vec![],
-        outputs: vec![Source::Id("456".into())]
-    };
-    */
-    
-
-    //let pipeline = Pipeline::from_nodes(&[a, b, c, d, e, f]);
 
     let container = {
         let mut c = Container::new();
@@ -317,6 +340,7 @@ fn test_nodes_topo() {
 
 
     let result = pipeline.run(container);
+    println!("result: {:#?}", result);
 
     let a_plus_b = result.get::<u32>("a_plus_b");
     assert_eq!(*a_plus_b, 8);
