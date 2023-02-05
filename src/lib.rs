@@ -50,13 +50,12 @@ impl NodeSources {
                 NodeSources::Map(h) 
             },
             NodeSources::Map(m) => {
-                /*
-                let mapped = m.iter().map(|(k, v)| {
-                    (map(k), map(v))
-                });
-                Self::Map(mapped.collect())
-                */
-                todo!()
+                let mut h = HashMap::new();
+                for (node_id, global_id) in m {
+                    let new_global_id = map(global_id);
+                    h.insert(node_id.clone(), new_global_id);
+                }
+                NodeSources::Map(h)
             },
         }
     }
@@ -492,6 +491,21 @@ fn test_namespaces() -> QupidoResult {
         Pipeline::from_nodes(&[n])
     }
 
+    pub fn num_calc_map<T>() -> QupidoResult<Pipeline>
+        where T: Add<T, Output = T> + Debug + Clone + 'static
+    {
+        let n = Node::new([(id("my_x"), id("x")), (id("my_y"), id("y"))], [(id("my_x+y"), id("x+y"))],
+        |ctx| {
+            let x = ctx.inputs.get::<T>("my_x")?;
+            let y = ctx.inputs.get::<T>("my_y")?;
+
+            let mut r = Container::new();
+            r.insert("my_x+y", x.clone() + y.clone())?;
+            Ok(r)
+        });
+        Pipeline::from_nodes(&[n])
+    }
+
     let x_y = num_calc::<i64>()?;
     let mut data = Container::new();
     data.insert("x", -3 as i64)?;
@@ -512,7 +526,24 @@ fn test_namespaces() -> QupidoResult {
     let data2_result = x_y_namespaced.run(&data2)?;
     assert_eq!(*data2_result.get::<i64>("calc.x+y")?, 15);
 
+    {
+        let x_y = num_calc_map::<i64>()?;
+        let mut data = Container::new();
+        data.insert("x", -5 as i64)?;
+        data.insert("y", 6 as i64)?;
+    
+        let data_result = x_y.run(&data)?;
+        assert_eq!(*data_result.get::<i64>("x+y")?, 1 as i64);
 
+        let namespaced = x_y.with_namespace("foo")?;
+        println!("namespaced: {:#?}", namespaced);
+        let mut data = Container::new();
+        data.insert("foo.x", -5 as i64)?;
+        data.insert("foo.y", 6 as i64)?;
+    
+        let data_result = namespaced.run(&data)?;
+        assert_eq!(*data_result.get::<i64>("foo.x+y")?, 1 as i64);
+    }
 
     Ok(())
 }
