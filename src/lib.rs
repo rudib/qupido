@@ -131,7 +131,7 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
-    pub fn from_nodes(nodes: &[Node]) -> Pipeline {
+    pub fn from_nodes(nodes: &[Node]) -> QupidoResult<Pipeline> {
         let mut g = Graph::<Uuid, Source>::new();
         
         let graph_nodes: HashMap<Uuid, _> = nodes.iter()
@@ -142,32 +142,29 @@ impl Pipeline {
         for n in nodes {
             for o in &n.outputs.outputs() {
                 if let Some(_) = outputs.insert(o.clone(), n.id) {
-                    panic!("Duplicate output");
+                    return Err(QupidoError::DuplicateData(o.get_id()));
                 }
             }
         }
         for n in nodes {
-            let dst = graph_nodes.get(&n.id).expect("Dest node not found");
+            let dst = graph_nodes.get(&n.id).ok_or(QupidoError::NodeNotFound)?;
             
             for i in n.inputs.inputs() {
                 if let Some(node_source_id) = outputs.get(&i) {
-                    let src = graph_nodes.get(node_source_id).expect("Source node not found");
+                    let src = graph_nodes.get(node_source_id).ok_or(QupidoError::NodeNotFound)?;
                     g.add_edge(src.clone(), dst.clone(), i.clone());
                 }
             }
         }
 
-        let sorted = toposort(&g, None).expect("Can't topologically sort");
+        let sorted = toposort(&g, None).map_err(|e| QupidoError::InvalidPipeline)?;
 
-        Pipeline {
+        Ok(Pipeline {
             nodes: sorted.into_iter()
                         .map(|idx| nodes.get(idx.index()).unwrap().clone())
                         .collect(),
             graph: g
-        }
-
-        
-        
+        })
     }
 
     pub fn run(&self, container: Container) -> QupidoResult<Container> {
@@ -183,7 +180,8 @@ impl Pipeline {
                     NodeSources::List(_) => (),
                     NodeSources::Map(m) => {
                         for (node_id, global_id) in m {
-                            c.data.insert(node_id.get_id(), c.data.get(&global_id.get_id()).expect("missing?").clone());
+                            let v = c.data.get(&global_id.get_id()).ok_or(QupidoError::DataNotFound(global_id.get_id()))?;
+                            c.data.insert(node_id.get_id(), v.clone());
                         }
                     },
                 }
@@ -197,13 +195,13 @@ impl Pipeline {
             match &n.outputs {
                 NodeSources::List(l) => {
                     for o in l {
-                        let val = res.data.remove(&o.get_id()).expect("Missing output?");
+                        let val = res.data.remove(&o.get_id()).ok_or(QupidoError::DataNotFound(o.get_id()))?;
                         container_run_state.data.insert(o.get_id(), val);
                     }
                 },
                 NodeSources::Map(m) => {
                     for (node_id, global_id) in m {
-                        let val = res.data.remove(&node_id.get_id()).expect("missing?");
+                        let val = res.data.remove(&node_id.get_id()).ok_or(QupidoError::DataNotFound(node_id.get_id()))?;
                         container_run_state.data.insert(global_id.get_id(), val);
                     }
                 },
@@ -218,7 +216,7 @@ impl Pipeline {
         let mut r = vec![];
         
         for n in &self.nodes {
-            let idx = self.graph.node_weights().position(|id| n.id == *id).expect("ha?");            
+            let idx = self.graph.node_weights().position(|id| n.id == *id).ok_or(QupidoError::NodeNotFound).unwrap();
             let idx = self.graph.from_index(idx);
         
             let incoming_edges = self.graph.edges_directed(idx, petgraph::Direction::Incoming).collect::<Vec<_>>();
@@ -238,7 +236,7 @@ impl Pipeline {
         let mut r = vec![];
         
         for n in &self.nodes {
-            let idx = self.graph.node_weights().position(|id| n.id == *id).expect("ha?");            
+            let idx = self.graph.node_weights().position(|id| n.id == *id).ok_or(QupidoError::NodeNotFound).unwrap();
             let idx = self.graph.from_index(idx);
         
             let outgoing_edges = self.graph.edges_directed(idx, petgraph::Direction::Outgoing).collect::<Vec<_>>();
@@ -321,7 +319,7 @@ impl Container {
     pub fn get<V>(&self, key: &str) -> QupidoResult<&V>
         where V: ContainerData + 'static
     {
-        let v = self.data.get(key).expect(&format!("id {} not found", key));
+        let v = self.data.get(key).ok_or(QupidoError::DataNotFound(key.to_string()))?;
         let v = (***v).as_any();
 
         if let Some(v) = v.downcast_ref() {
@@ -341,7 +339,8 @@ pub enum QupidoError {
         id: String,
         requested: TypeId,
         stored: TypeId
-    }
+    },
+    NodeNotFound,
 }
 
 pub type QupidoResult<T = ()> = Result<T, QupidoError>;
@@ -386,7 +385,7 @@ fn test_nodes_topo() -> QupidoResult {
         c
     };
 
-    let pipeline = Pipeline::from_nodes(&[a, b, c]);
+    let pipeline = Pipeline::from_nodes(&[a, b, c])?;
 
     println!("pipeline={:#?}", pipeline);
 
