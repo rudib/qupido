@@ -8,18 +8,18 @@ use crate::{source::NodeSources, Tag, Context, QupidoResult, container::Containe
 
 
 #[derive(Clone, Debug)]
-pub struct Node {
+pub struct Node<T> {
     pub id: Uuid,
     pub inputs: NodeSources,
     pub outputs: NodeSources,
     pub tags: Vec<Tag>,
-    pub func: NodeFunc,
+    pub func: NodeFunc<T>,
     pub namespace: Option<String>
 }
 
-impl Node {
+impl<T> Node<T> where T: Clone {
     pub fn new<F>(inputs: impl Into<NodeSources>, outputs: impl Into<NodeSources>, func: F) -> Self
-        where F: Fn(&Context) -> QupidoResult<Container> + 'static
+        where F: Fn(&Context<T>) -> QupidoResult<Container<T>> + 'static
     {
         Node {
             id: Uuid::new_v4(),
@@ -39,11 +39,11 @@ impl Node {
 }
 
 #[derive(Clone)]
-pub struct NodeFunc {
-    pub f: Arc<Box<dyn Fn(&Context) -> QupidoResult<Container>>>
+pub struct NodeFunc<T> {
+    pub f: Arc<Box<dyn Fn(&Context<T>) -> QupidoResult<Container<T>>>>
 }
 
-impl std::fmt::Debug for NodeFunc {
+impl<T> std::fmt::Debug for NodeFunc<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NodeFunc").field("f", &"some func").finish()
     }

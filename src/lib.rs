@@ -41,13 +41,10 @@ pub fn id(s: impl Into<String>) -> Source {
 
 
 
-pub struct Context {
-    pub inputs: crate::container::Container
+pub struct Context<T> {
+    pub inputs: crate::container::Container<T>
 }
 
-impl Context {
-    
-}
 
 
 #[derive(Debug, Clone)]

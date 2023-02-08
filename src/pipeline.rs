@@ -8,13 +8,13 @@ use uuid::Uuid;
 use crate::{node::Node, Source, QupidoResult, QupidoError, container::Container, source::NodeSources, Context, id};
 
 #[derive(Debug)]
-pub struct Pipeline {
-    nodes: Vec<Node>,
+pub struct Pipeline<T> {
+    nodes: Vec<Node<T>>,
     graph: Graph<Uuid, Source>
 }
 
-impl Pipeline {
-    pub fn from_nodes(nodes: &[Node]) -> QupidoResult<Pipeline> {
+impl<T> Pipeline<T> where T: Clone {
+    pub fn from_nodes(nodes: &[Node<T>]) -> QupidoResult<Pipeline<T>> {
         let mut g = Graph::<Uuid, Source>::new();
         
         let graph_nodes: HashMap<Uuid, _> = nodes.iter()
@@ -50,7 +50,7 @@ impl Pipeline {
         })
     }
 
-    pub fn run(&self, container: &Container) -> QupidoResult<Container> {
+    pub fn run(&self, container: &Container<T>) -> QupidoResult<Container<T>> {
 
         let mut container_run_state = container.clone();
 
@@ -149,13 +149,13 @@ impl Pipeline {
         r
     }
 
-    pub fn add(&self, other: &Pipeline) -> QupidoResult<Pipeline> {
+    pub fn add(&self, other: &Pipeline<T>) -> QupidoResult<Pipeline<T>> {
         let mut a = self.nodes.clone();
         a.extend_from_slice(&other.nodes);
         Self::from_nodes(a.as_slice())
     }
 
-    pub fn with_namespace(&self, namespace: &str) -> QupidoResult<Pipeline> {
+    pub fn with_namespace(&self, namespace: &str) -> QupidoResult<Pipeline<T>> {
         let new_nodes: Vec<_> = self.nodes.iter().map(|n| {
             let mapping = |node_id: &Source| {
                 let global_id = id(format!("{}.{}", namespace, node_id.get_id()));
@@ -209,14 +209,14 @@ fn test_nodes_topo() -> QupidoResult {
         }).tag("math").tag("plus").tag("multiply");
 
     let b = Node::new([id("a_plus_b")], [id("squared")], |ctx| {
-        let v = ctx.inputs.get::<u32>("a_plus_b")?;
+        let v = ctx.inputs.get("a_plus_b")?;
         let mut r = Container::new();
         r.insert("squared", v * v)?;
         Ok(r)
     }).tag("math");
 
     let c = Node::new([id("squared")], [id("squared_plus_1")], |ctx| {
-        let v = ctx.inputs.get::<u32>("squared")?;
+        let v = ctx.inputs.get("squared")?;
         let mut r = Container::new();
         r.insert("squared_plus_1", v + 1)?;
         Ok(r)
@@ -241,14 +241,14 @@ fn test_nodes_topo() -> QupidoResult {
         let result = pipeline.run(&container)?;
         println!("result: {:#?}", result);
 
-        let a_plus_b = result.get::<u32>("a_plus_b")?;
+        let a_plus_b = result.get("a_plus_b")?;
         assert_eq!(*a_plus_b, 8);
     }
 
 
     let pb = Pipeline::from_nodes(&[
         Node::new([id("squared_plus_1")], (), |ctx| {
-            println!("val: {:?}", ctx.inputs.get::<u32>("squared_plus_1")?);
+            println!("val: {:?}", ctx.inputs.get("squared_plus_1")?);
             Ok(Container::new())
         })
     ])?;
@@ -265,13 +265,13 @@ fn test_nodes_topo() -> QupidoResult {
 #[test]
 fn test_namespaces() -> QupidoResult {
 
-    pub fn num_calc<T>() -> QupidoResult<Pipeline>
+    pub fn num_calc<T>() -> QupidoResult<Pipeline<T>>
         where T: Add<T, Output = T> + Debug + Clone + 'static
     {
         let n = Node::new([id("x"), id("y")], [id("x+y")],
         |ctx| {
-            let x = ctx.inputs.get::<T>("x")?;
-            let y = ctx.inputs.get::<T>("y")?;
+            let x: &T = ctx.inputs.get("x")?;
+            let y: &T = ctx.inputs.get("y")?;
 
             let mut r = Container::new();
             r.insert("x+y", x.clone() + y.clone())?;
@@ -280,13 +280,13 @@ fn test_namespaces() -> QupidoResult {
         Pipeline::from_nodes(&[n])
     }
 
-    pub fn num_calc_map<T>() -> QupidoResult<Pipeline>
+    pub fn num_calc_map<T>() -> QupidoResult<Pipeline<T>>
         where T: Add<T, Output = T> + Debug + Clone + 'static
     {
         let n = Node::new([(id("my_x"), id("x")), (id("my_y"), id("y"))], [(id("my_x+y"), id("x+y"))],
         |ctx| {
-            let x = ctx.inputs.get::<T>("my_x")?;
-            let y = ctx.inputs.get::<T>("my_y")?;
+            let x: &T = ctx.inputs.get("my_x")?;
+            let y: &T = ctx.inputs.get("my_y")?;
 
             let mut r = Container::new();
             r.insert("my_x+y", x.clone() + y.clone())?;
@@ -301,7 +301,7 @@ fn test_namespaces() -> QupidoResult {
     data.insert("y", 12 as i64)?;
 
     let data_result = x_y.run(&data)?;
-    assert_eq!(*data_result.get::<i64>("x+y")?, 9 as i64);
+    assert_eq!(*data_result.get("x+y")?, 9 as i64);
 
     let x_y_namespaced = num_calc::<i64>()?.with_namespace("calc")?;
     println!("namespaced={:#?}", x_y_namespaced);
@@ -313,7 +313,7 @@ fn test_namespaces() -> QupidoResult {
     data2.insert("calc.x", 5 as i64)?;
     data2.insert("calc.y", 10 as i64)?;
     let data2_result = x_y_namespaced.run(&data2)?;
-    assert_eq!(*data2_result.get::<i64>("calc.x+y")?, 15);
+    assert_eq!(*data2_result.get("calc.x+y")?, 15);
 
     {
         let x_y = num_calc_map::<i64>()?;
@@ -322,7 +322,7 @@ fn test_namespaces() -> QupidoResult {
         data.insert("y", 6 as i64)?;
     
         let data_result = x_y.run(&data)?;
-        assert_eq!(*data_result.get::<i64>("x+y")?, 1 as i64);
+        assert_eq!(*data_result.get("x+y")?, 1 as i64);
 
         let namespaced = x_y.with_namespace("foo")?;
         println!("namespaced: {:#?}", namespaced);
@@ -331,7 +331,7 @@ fn test_namespaces() -> QupidoResult {
         data.insert("foo.y", 6 as i64)?;
     
         let data_result = namespaced.run(&data)?;
-        assert_eq!(*data_result.get::<i64>("foo.x+y")?, 1 as i64);
+        assert_eq!(*data_result.get("foo.x+y")?, 1 as i64);
     }
 
     Ok(())
