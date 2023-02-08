@@ -1,6 +1,7 @@
 [workspace]
 members = [
-	"qupido"
+	"qupido",
+	"qupido_data"
 ]
 
 exclude = [
