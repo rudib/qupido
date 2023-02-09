@@ -8,7 +8,7 @@ async fn test_oscars_pipeline() -> Result<(), DataFusionError> {
     
     let container = {
         let mut container = Container::new();
-        container.insert("oscar_awards", df);
+        container.insert("oscar_awards", df).unwrap();
         container
     };
 
@@ -24,7 +24,7 @@ async fn test_oscars_pipeline() -> Result<(), DataFusionError> {
         Ok(c)
     });
 
-    let node_categorie_clean = Node::<DataFrame>::new(id("oscar_categories"), id("oscar_categories_clean"), |ctx| {
+    let node_categories_clean = Node::<DataFrame>::new(id("oscar_categories"), id("oscar_categories_clean"), |ctx| {
         let df = ctx.inputs.get("oscar_categories")?;
         let df_clean = df.clone()
             .select(vec![regexp_replace(vec![col("category"), lit("\\(.*\\)"), lit("")]).alias("category")]).unwrap()
@@ -37,7 +37,7 @@ async fn test_oscars_pipeline() -> Result<(), DataFusionError> {
         Ok(c)
     });
 
-    let pipeline = Pipeline::from_nodes(&[node_categories, node_categorie_clean]).unwrap();
+    let pipeline = Pipeline::from_nodes(&[node_categories, node_categories_clean]).unwrap();
     let resulting_container = pipeline.run(&container).unwrap();
 
     let categories = resulting_container.get("oscar_categories").unwrap();
