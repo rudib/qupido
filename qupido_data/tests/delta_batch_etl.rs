@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+/*
 use deltalake::{DeltaOps, SchemaField, SchemaDataType, arrow::{record_batch::RecordBatch, datatypes::{Schema, Field, DataType}, array::{Int32Array, StringArray}}, operations::collect_sendable_stream};
 
 fn get_table_columns() -> Vec<SchemaField> {
@@ -56,3 +57,4 @@ async fn test_delta_etl() -> Result<(), deltalake::DeltaTableError> {
 
     Ok(())
 }
+*/

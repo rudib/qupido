@@ -49,6 +49,12 @@ impl NodeSources {
     }
 }
 
+impl From<Source> for NodeSources {
+    fn from(value: Source) -> Self {
+        NodeSources::List(vec![value])
+    }
+}
+
 impl From<&[Source]> for NodeSources {
     fn from(value: &[Source]) -> Self {
         NodeSources::List(value.to_vec())
